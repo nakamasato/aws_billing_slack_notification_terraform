@@ -6,6 +6,7 @@ from datetime import datetime
 from datetime import date
 
 SLACK_WEBHOOK_URL = os.environ['SLACK_WEBHOOK_URL']
+MIN_COST = 0.01
 
 
 def lambda_handler(event, context):
@@ -27,7 +28,6 @@ def lambda_handler(event, context):
 
 
 def get_total_billing(client):
-    # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/ce.html#CostExplorer.Client.get_cost_and_usage
     response = client.get_cost_and_usage(
         TimePeriod={
             'Start': get_begin_of_month(),
@@ -46,7 +46,6 @@ def get_total_billing(client):
 
 
 def get_service_billings(client):
-    # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/ce.html#CostExplorer.Client.get_cost_and_usage
     response = client.get_cost_and_usage(
         TimePeriod={
             'Start': get_begin_of_month(),
@@ -64,14 +63,18 @@ def get_service_billings(client):
         ]
     )
 
-    billings = []
-
-    for item in response['ResultsByTime'][0]['Groups']:
-        billings.append({
-            'service_name': item['Keys'][0],
-            'billing': item['Metrics']['AmortizedCost']['Amount']
-        })
-    return billings
+    return sorted(
+        [
+            {
+                'service_name': item['Keys'][0],
+                'billing': float(item['Metrics']['AmortizedCost']['Amount'])
+            }
+            for item 
+            in response['ResultsByTime'][0]['Groups']
+        ], 
+        key=lambda k: k['billing'],
+        reverse=True
+    )
 
 
 def get_message(total_billing, service_billings):
@@ -81,33 +84,35 @@ def get_message(total_billing, service_billings):
 
     title = f'{start}～{end} total: {total:.2f} USD'
 
-    details = []
-    for item in service_billings:
-        service_name = item['service_name']
-        billing = round(float(item['billing']), 2)
-
-        if billing == 0.0:
-            continue
-        details.append(f'　・{service_name}: {billing:.2f} USD')
-
-    return title, '\n'.join(details)
+    filtered_billings = [
+        item for item
+        in service_billings 
+        if item['billing'] > MIN_COST
+    ]
+    rows = [
+        '- %s: %.2f USD' % 
+        (
+            item['service_name'], 
+            float(item['billing'])
+        )
+        for item 
+        in filtered_billings
+    ]
+    return title, '\n'.join(rows)
 
 
 def post_slack(title, detail):
-    # https://api.slack.com/incoming-webhooks
-    # https://api.slack.com/docs/message-formatting
-    # https://api.slack.com/docs/messages/builder
+
     payload = {
         'attachments': [
             {
-                'color': '#36a64f',
+                'color': 'good',
                 'pretext': title,
                 'text': detail
             }
         ]
     }
 
-    # http://requests-docs-ja.readthedocs.io/en/latest/user/quickstart/
     try:
         response = requests.post(SLACK_WEBHOOK_URL, data=json.dumps(payload))
     except requests.exceptions.RequestException as e:
@@ -118,11 +123,8 @@ def post_slack(title, detail):
 
 def get_begin_of_month():
     today = date.today()
-
-    # ISO 8601
     return date(today.year, today.month, 1).isoformat()
 
 
 def get_today():
-    # ISO 8601
     return date.today().isoformat()
